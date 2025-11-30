@@ -1,77 +1,103 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import joblib
 import pandas as pd
 import numpy as np
+# your ML imports here
 
 app = Flask(__name__)
-CORS(app)  # Allow requests from your Floot app
-
-# Load saved model artifacts
-model = joblib.load('credit_risk_model.pkl')
-scaler = joblib.load('scaler.pkl')
-model_columns = joblib.load('model_columns.pkl')
+CORS(app)  # Enable CORS for all routes
 
 @app.route('/predict', methods=['POST'])
 def predict():
     try:
         data = request.json
         
-        # Safely get values with defaults to prevent None comparison errors
-        annual_income = data.get('person_income', 0) or 0
-        loan_amount = data.get('loan_amnt', 0) or 0
-        
-        # Map Floot form fields to model fields
-        input_data = {
-            'person_age': data.get('person_age', 30),
-            'person_income': annual_income,
-            'person_emp_length': data.get('person_emp_length', 0),
-            'loan_amnt': loan_amount,
-            'loan_int_rate': data.get('loan_int_rate', 10.0),
-            'loan_percent_income': loan_amount / annual_income if annual_income > 0 else 0,
-            'cb_person_cred_hist_length': data.get('cb_person_cred_hist_length', 5.0),
-            'person_home_ownership': data.get('person_home_ownership', 'RENT'),
-            'loan_intent': data.get('loan_intent', 'PERSONAL').upper(),
-            'loan_grade': data.get('loan_grade', 'B'),
-            'cb_person_default_on_file': data.get('cb_person_default_on_file', 'N')
+        # Extract ALL fields from the request
+        features = {
+            # Original fields
+            'annual_income': float(data.get('annualIncome', 0)),
+            'loan_amount': float(data.get('loanAmount', 0)),
+            'credit_score': int(data.get('creditScore', 300)),
+            'existing_debt': float(data.get('existingDebt', 0)),
+            'employment_years': int(data.get('employmentYears', 0)),
+            'employment_status': data.get('employmentStatus', 'unemployed'),
+            'loan_purpose': data.get('loanPurpose', 'other'),
+            'has_collateral': data.get('hasCollateral', False),
+            
+            # NEW FIELDS - Add these!
+            'person_age': int(data.get('personAge', 18)),
+            'home_ownership': data.get('homeOwnership', 'rent'),
+            'loan_term': int(data.get('loanTerm', 36)),
+            'credit_history_length': int(data.get('creditHistoryLength', 0)),
+            'has_previous_defaults': data.get('hasPreviousDefaults', False),
+            'loan_grade': data.get('loanGrade', 'C'),
+            'interest_rate': float(data.get('interestRate', 10.0))
         }
         
-        # Convert to DataFrame
-        df = pd.DataFrame([input_data])
+        # Convert to DataFrame for your ML model
+        df = pd.DataFrame([features])
         
-        # Apply same preprocessing as training
-        df = pd.get_dummies(df, columns=['person_home_ownership', 'loan_intent', 'loan_grade', 'cb_person_default_on_file'], drop_first=True)
+        # YOUR ML PREDICTION CODE HERE
+        # prediction = your_model.predict(df)
+        # confidence = your_model.predict_proba(df)
         
-        # Align columns with training data
-        df = df.reindex(columns=model_columns, fill_value=0)
+        # For now, example response structure:
+        prediction_result = "approved"  # or "rejected"
+        confidence = 0.93  # 0 to 1
         
-        # Scale
-        scaled_data = scaler.transform(df)
+        # Generate risk factors based on the data
+        risk_factors = []
         
-        # Predict
-        prediction = model.predict(scaled_data)[0]
-        probabilities = model.predict_proba(scaled_data)[0]
-        confidence = float(max(probabilities))
-        
-        # Get feature importances for risk factors
-        feature_importance = model.feature_importances_
-        top_features_idx = np.argsort(feature_importance)[-5:][::-1]
-        risk_factors = [model_columns[i] for i in top_features_idx]
+        # Example risk factor logic
+        if features['credit_score'] < 650:
+            risk_factors.append({
+                "factor": "credit_score",
+                "impact": "negative",
+                "description": "Credit score below optimal threshold"
+            })
+        elif features['credit_score'] >= 750:
+            risk_factors.append({
+                "factor": "credit_score",
+                "impact": "positive",
+                "description": "Excellent credit score"
+            })
+            
+        dti_ratio = (features['existing_debt'] / features['annual_income']) * 100
+        if dti_ratio > 40:
+            risk_factors.append({
+                "factor": "dti_ratio",
+                "impact": "negative",
+                "description": f"High debt-to-income ratio ({dti_ratio:.1f}%)"
+            })
+        elif dti_ratio < 30:
+            risk_factors.append({
+                "factor": "dti_ratio",
+                "impact": "positive",
+                "description": f"Low debt-to-income ratio ({dti_ratio:.1f}%)"
+            })
+            
+        if features['has_previous_defaults']:
+            risk_factors.append({
+                "factor": "defaults",
+                "impact": "negative",
+                "description": "Previous payment defaults on record"
+            })
+            
+        if features['employment_years'] > 3:
+            risk_factors.append({
+                "factor": "employment",
+                "impact": "positive",
+                "description": "Stable employment history"
+            })
         
         return jsonify({
-            'predictionResult': 'rejected' if prediction == 1 else 'approved',
-            'approvalConfidence': confidence,
-            'riskFactors': risk_factors,
-            'message': 'Prediction completed successfully'
+            'prediction': prediction_result,
+            'confidence': confidence,
+            'risk_factors': risk_factors
         })
         
     except Exception as e:
-        print(f"Error in prediction: {str(e)}")  # This will show in Render logs
         return jsonify({'error': str(e)}), 400
 
-@app.route('/health', methods=['GET'])
-def health():
-    return jsonify({'status': 'healthy'})
-
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    app.run(debug=True, port=5000)
