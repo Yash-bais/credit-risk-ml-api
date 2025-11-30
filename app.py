@@ -18,7 +18,8 @@ try:
     scaler = joblib.load('scaler.pkl')
     model_columns = joblib.load('model_columns.pkl')
     print(f"✓ Model loaded successfully")
-    print(f"✓ Model expects {len(model_columns)} features: {model_columns}")
+    print(f"✓ Scaler loaded successfully")
+    print(f"✓ Model expects {len(model_columns)} features")
 except FileNotFoundError as e:
     print(f"ERROR: Model files not found. Please run the training script first.")
     print(f"Missing file: {e}")
@@ -26,40 +27,103 @@ except FileNotFoundError as e:
     scaler = None
     model_columns = None
 
-if rf_model is not None:
-    print("\n" + "="*60)
-    print("TESTING MODEL")
-    print("="*60)
+# ============================================
+# DIAGNOSTIC TEST AT STARTUP
+# ============================================
+if rf_model is not None and model_columns is not None:
+    print("\n" + "="*70)
+    print("TRAINING FEATURES (what the model expects):")
+    print("="*70)
+    for i, col in enumerate(model_columns):
+        print(f"  {i+1:2d}. {col}")
+    print("="*70)
+    print(f"Total training features: {len(model_columns)}")
+    print("="*70 + "\n")
     
-    # Test 1: Obviously BAD application (should be REJECTED)
-    test_bad = {
-        'person_age': 25, 'person_income': 5000, 'person_emp_length': 1,
-        'loan_amnt': 150000, 'loan_int_rate': 20.0, 'loan_percent_income': 30.0,
-        'cb_person_cred_hist_length': 1, 'person_home_ownership': 'RENT',
-        'loan_intent': 'PERSONAL', 'loan_grade': 'G', 'cb_person_default_on_file': 'Y'
-    }
+    print("="*70)
+    print("TESTING MODEL WITH TWO APPLICATIONS")
+    print("="*70)
     
-    # Test 2: Obviously GOOD application (should be APPROVED)
-    test_good = {
-        'person_age': 35, 'person_income': 100000, 'person_emp_length': 10,
-        'loan_amnt': 10000, 'loan_int_rate': 5.0, 'loan_percent_income': 0.1,
-        'cb_person_cred_hist_length': 15, 'person_home_ownership': 'OWN',
-        'loan_intent': 'PERSONAL', 'loan_grade': 'A', 'cb_person_default_on_file': 'N'
-    }
+    test_cases = [
+        {
+            'label': 'BAD (should be REJECTED)',
+            'data': {
+                'person_age': 25,
+                'person_income': 5000,
+                'person_emp_length': 1,
+                'loan_amnt': 150000,
+                'loan_int_rate': 20.0,
+                'loan_percent_income': 30.0,
+                'cb_person_cred_hist_length': 1,
+                'person_home_ownership': 'RENT',
+                'loan_intent': 'PERSONAL',
+                'loan_grade': 'G',
+                'cb_person_default_on_file': 'Y'
+            }
+        },
+        {
+            'label': 'GOOD (should be APPROVED)',
+            'data': {
+                'person_age': 35,
+                'person_income': 100000,
+                'person_emp_length': 10,
+                'loan_amnt': 10000,
+                'loan_int_rate': 5.0,
+                'loan_percent_income': 0.1,
+                'cb_person_cred_hist_length': 15,
+                'person_home_ownership': 'OWN',
+                'loan_intent': 'PERSONAL',
+                'loan_grade': 'A',
+                'cb_person_default_on_file': 'N'
+            }
+        }
+    ]
     
-    for label, test_data in [("BAD", test_bad), ("GOOD", test_good)]:
+    for test_case in test_cases:
+        label = test_case['label']
+        test_data = test_case['data']
+        
+        print(f"\n{label}:")
+        print(f"  Input: Income=${test_data['person_income']}, Loan=${test_data['loan_amnt']}, Grade={test_data['loan_grade']}, Defaults={test_data['cb_person_default_on_file']}")
+        
+        # Create DataFrame
         df_test = pd.DataFrame([test_data])
-        df_test_encoded = pd.get_dummies(df_test, columns=['person_home_ownership', 'loan_intent', 'loan_grade', 'cb_person_default_on_file'], drop_first=True)
+        
+        # One-hot encode
+        df_test_encoded = pd.get_dummies(
+            df_test, 
+            columns=['person_home_ownership', 'loan_intent', 'loan_grade', 'cb_person_default_on_file'],
+            drop_first=True
+        )
+        
+        # Align with training features
         for col in model_columns:
             if col not in df_test_encoded.columns:
                 df_test_encoded[col] = 0
+        
+        # Keep only training columns in correct order
         df_test_aligned = df_test_encoded[model_columns]
+        
+        # Scale
         X_test_scaled = scaler.transform(df_test_aligned)
+        
+        # Predict
         pred = rf_model.predict(X_test_scaled)[0]
         proba = rf_model.predict_proba(X_test_scaled)[0]
-        print(f"{label} application -> raw prediction: {pred}, probabilities: {proba}")
-    
-    print("="*60 + "\n")
+        
+        print(f"  Raw prediction: {pred}")
+        print(f"  Probabilities: Class 0={proba[0]:.4f}, Class 1={proba[1]:.4f}")
+        print(f"  Features sum: {df_test_aligned.values.sum():.2f} (should be different for each test)")
+        
+    print("="*70)
+    print("DIAGNOSIS:")
+    print("  - If BOTH tests have IDENTICAL probabilities -> Feature mismatch issue")
+    print("  - If probabilities are DIFFERENT -> Model is working, check label mapping")
+    print("="*70 + "\n")
+
+# ============================================
+# FLASK ROUTES
+# ============================================
 
 @app.route('/predict', methods=['POST'])
 def predict():
@@ -78,7 +142,9 @@ def predict():
         data = request.json
         
         # Log incoming request
-        print(f"Received prediction request: {data}")
+        print(f"\n{'='*70}")
+        print(f"NEW PREDICTION REQUEST at {datetime.now().isoformat()}")
+        print(f"{'='*70}")
         
         # ============================================
         # STEP 1: Extract and validate input data
@@ -110,6 +176,8 @@ def predict():
         if loan_percent_income == 0 and person_income > 0:
             loan_percent_income = (loan_amnt / person_income) * 100
         
+        print(f"Input: Age={person_age}, Income=${person_income}, Loan=${loan_amnt}, Grade={loan_grade}, Defaults={cb_person_default_on_file}")
+        
         # ============================================
         # STEP 2: Create base features dataframe
         # ============================================
@@ -129,7 +197,7 @@ def predict():
         
         df_input = pd.DataFrame([input_data])
         
-        print(f"Input dataframe before encoding:\n{df_input}")
+        print(f"DataFrame created with shape: {df_input.shape}")
         
         # ============================================
         # STEP 3: Apply one-hot encoding (same as training)
@@ -140,26 +208,43 @@ def predict():
             drop_first=True
         )
         
-        print(f"Encoded features: {list(df_encoded.columns)}")
+        print(f"After encoding: {df_encoded.shape[1]} features")
+        print(f"Encoded columns: {list(df_encoded.columns)}")
         
         # ============================================
         # STEP 4: Align features with training data
         # ============================================
         # Add missing columns with 0 values
+        missing_cols = []
         for col in model_columns:
             if col not in df_encoded.columns:
                 df_encoded[col] = 0
+                missing_cols.append(col)
+        
+        if missing_cols:
+            print(f"Added {len(missing_cols)} missing columns (set to 0): {missing_cols[:5]}{'...' if len(missing_cols) > 5 else ''}")
         
         # Keep only the columns that were in training (in the same order)
         df_aligned = df_encoded[model_columns]
         
-        print(f"Aligned features shape: {df_aligned.shape}")
-        print(f"Feature values:\n{df_aligned.iloc[0].to_dict()}")
+        print(f"After alignment: {df_aligned.shape}")
+        print(f"Features match training? {list(df_aligned.columns) == model_columns}")
+        print(f"Non-zero features: {(df_aligned != 0).sum().sum()}")
+        print(f"Features sum: {df_aligned.values.sum():.2f}")
+        
+        # Debug: Print first 10 non-zero features
+        non_zero_features = df_aligned.iloc[0][df_aligned.iloc[0] != 0]
+        print(f"Non-zero feature values (first 10):")
+        for i, (feat, val) in enumerate(non_zero_features.items()):
+            if i >= 10:
+                break
+            print(f"  {feat}: {val}")
         
         # ============================================
         # STEP 5: Scale features
         # ============================================
         X_scaled = scaler.transform(df_aligned)
+        print(f"Scaled features range: [{X_scaled.min():.2f}, {X_scaled.max():.2f}]")
         
         # ============================================
         # STEP 6: Make prediction
@@ -167,13 +252,16 @@ def predict():
         prediction_numeric = rf_model.predict(X_scaled)[0]
         prediction_proba = rf_model.predict_proba(X_scaled)[0]
         
-        # prediction_numeric: 0 = approved (no default), 1 = rejected (default likely)
-        prediction = "approved" if prediction_numeric == 1 else "rejected"
-        confidence = float(prediction_proba.max())  # Confidence in the prediction
-        
         print(f"Raw prediction: {prediction_numeric}")
-        print(f"Prediction probabilities: {prediction_proba}")
-        print(f"Final prediction: {prediction}, Confidence: {confidence:.4f}")
+        print(f"Prediction probabilities: Class 0={prediction_proba[0]:.4f}, Class 1={prediction_proba[1]:.4f}")
+        
+        # Map prediction to approval/rejection
+        # Based on typical credit datasets: 0 = no default (approve), 1 = default (reject)
+        prediction = "rejected" if prediction_numeric == 1 else "approved"
+        confidence = float(prediction_proba.max())
+        
+        print(f"Final decision: {prediction.upper()} with {confidence:.4f} confidence")
+        print(f"{'='*70}\n")
         
         # ============================================
         # STEP 7: Generate risk factors explanation
@@ -323,7 +411,6 @@ def predict():
             'risk_factors': risk_factors
         }
         
-        print(f"Returning response: {response}")
         return jsonify(response)
         
     except Exception as e:
@@ -353,6 +440,7 @@ def home():
         'version': '2.0.0',
         'model': 'Random Forest Classifier',
         'model_status': model_status,
+        'features_count': len(model_columns) if model_columns else 0,
         'endpoints': {
             'predict': '/predict (POST)',
             'health': '/health (GET)'
@@ -361,14 +449,15 @@ def home():
     })
 
 if __name__ == '__main__':
-    print("=" * 60)
+    print("\n" + "="*70)
     print("Credit Risk Prediction API with Random Forest")
-    print("=" * 60)
+    print("="*70)
     if rf_model is not None:
-        print("✓ Model loaded successfully")
-        print(f"✓ Ready to make predictions")
+        print("✓ Model ready for predictions")
+        print("✓ Check the diagnostic output above to verify model behavior")
     else:
         print("✗ Model NOT loaded - please run training script first")
-    print("=" * 60)
+    print("="*70)
     print("Starting server on http://0.0.0.0:5000")
+    print("="*70 + "\n")
     app.run(debug=True, port=5000, host='0.0.0.0')
