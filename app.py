@@ -26,6 +26,51 @@ except FileNotFoundError as e:
     scaler = None
     model_columns = None
 
+if rf_model is not None:
+    print("\n" + "="*60)
+    print("TESTING MODEL WITH BAD APPLICATION")
+    print("="*60)
+    
+    # Test with obviously bad application
+    test_bad = {
+        'person_age': 25,
+        'person_income': 5000,
+        'person_emp_length': 1,
+        'loan_amnt': 150000,
+        'loan_int_rate': 20.0,
+        'loan_percent_income': 30.0,
+        'cb_person_cred_hist_length': 1,
+        'person_home_ownership': 'RENT',
+        'loan_intent': 'PERSONAL',
+        'loan_grade': 'G',
+        'cb_person_default_on_file': 'Y'
+    }
+    
+    # Encode it the same way
+    df_test = pd.DataFrame([test_bad])
+    df_test_encoded = pd.get_dummies(
+        df_test, 
+        columns=['person_home_ownership', 'loan_intent', 'loan_grade', 'cb_person_default_on_file'],
+        drop_first=True
+    )
+    
+    # Add missing columns
+    for col in model_columns:
+        if col not in df_test_encoded.columns:
+            df_test_encoded[col] = 0
+    df_test_aligned = df_test_encoded[model_columns]
+    
+    # Scale and predict
+    X_test_scaled = scaler.transform(df_test_aligned)
+    prediction_result = rf_model.predict(X_test_scaled)[0]
+    prediction_proba = rf_model.predict_proba(X_test_scaled)[0]
+    
+    print(f"Bad application raw prediction: {prediction_result}")
+    print(f"Prediction probabilities: {prediction_proba}")
+    print(f"Expected: 1 (means default/reject)")
+    print(f"If you got 0, your labels are FLIPPED!")
+    print("="*60 + "\n")
+
 @app.route('/predict', methods=['POST'])
 def predict():
     """
@@ -133,7 +178,7 @@ def predict():
         prediction_proba = rf_model.predict_proba(X_scaled)[0]
         
         # prediction_numeric: 0 = approved (no default), 1 = rejected (default likely)
-        prediction = "rejected" if prediction_numeric == 1 else "approved"
+        prediction = "approved" if prediction_numeric == 1 else "rejected"
         confidence = float(prediction_proba.max())  # Confidence in the prediction
         
         print(f"Raw prediction: {prediction_numeric}")
