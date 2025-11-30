@@ -1,8 +1,8 @@
-flask
+Flask==2.3.2
 flask-cors
 joblib
-scikit-learn
-pandas
+scikit-learn==1.6.1
+pandas==2.0.3
 numpy
 imbalanced-learn
-gunicorn
+gunicorn==21.2.0
