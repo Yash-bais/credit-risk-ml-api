@@ -4,7 +4,16 @@ import pandas as pd
 import numpy as np
 import joblib
 from datetime import datetime
+import argparse
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+from imblearn.over_sampling import SMOTE
+from sklearn.pipeline import Pipeline
 import os
+
+CLEANUP_TRAINING = False
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
@@ -12,25 +21,133 @@ CORS(app)  # Enable CORS for all routes
 # ============================================
 # LOAD MODEL ARTIFACTS AT STARTUP
 # ============================================
-print("Loading model artifacts...")
-try:
-    rf_model = joblib.load('credit_risk_model.pkl')
-    scaler = joblib.load('scaler.pkl')
-    model_columns = joblib.load('model_columns.pkl')
-    print(f"✓ Model loaded successfully")
-    print(f"✓ Scaler loaded successfully")
-    print(f"✓ Model expects {len(model_columns)} features")
-except FileNotFoundError as e:
-    print(f"ERROR: Model files not found. Please run the training script first.")
-    print(f"Missing file: {e}")
-    rf_model = None
-    scaler = None
-    model_columns = None
+def train_model(data_path: str, output_prefix: str = 'credit_risk_model'):
+    """Train a RandomForest model from a training CSV and save artifacts.
 
-# ============================================
-# DIAGNOSTIC TEST AT STARTUP
-# ============================================
-if rf_model is not None and model_columns is not None:
+    This mirrors the existing standalone training script. If you want to use
+    the dataset from disk, put the CSV in the project root (next to `app.py`)
+    or pass --data with a path.
+    """
+    import pandas as pd
+    import joblib
+    import os
+
+    if not os.path.exists(data_path):
+        print(f"ERROR: training data not found at: {data_path}")
+        return False
+
+    df = pd.read_csv(data_path)
+    print(f"Loaded training CSV: {data_path} (shape={df.shape})")
+
+    # --------------- detect target column ------------------
+    possible_targets = ['loan_status', 'default', 'target', 'loan_default']
+    target_col = None
+    for t in possible_targets:
+        if t in df.columns:
+            target_col = t
+            break
+
+    if target_col is None:
+        print(f"ERROR: No target column found. expected one of {possible_targets}")
+        return False
+
+    # --------------- detect feature schema ------------------
+    # We support two common schemas: the 'bankloans' minimal numeric features
+    # (age, ed, employ, address, income, debtinc, creddebt, othdebt) or the
+    # API-style person_* columns.
+    bank_features = ['age', 'ed', 'employ', 'address', 'income', 'debtinc', 'creddebt', 'othdebt']
+    person_features = ['person_age', 'person_income', 'person_emp_length', 'loan_amnt', 'loan_int_rate', 'loan_percent_income', 'cb_person_cred_hist_length']
+
+    if all(col in df.columns for col in bank_features):
+        # Drop rows missing the target
+        df = df.dropna(subset=[target_col])
+        X = df[bank_features + [c for c in df.columns if c not in bank_features + [target_col]]]
+        y = df[target_col]
+        print('Detected bankloans numeric schema; using numeric features')
+    elif any(col in df.columns for col in person_features):
+        # fallback: use all columns except target
+        df = df.dropna(subset=[target_col])
+        X = df.drop(target_col, axis=1)
+        y = df[target_col]
+        print('Detected API/person_* style schema; using all columns except the target')
+    else:
+        # last resort: use all columns except target
+        df = df.dropna(subset=[target_col])
+        X = df.drop(target_col, axis=1)
+        y = df[target_col]
+        print('Using all columns except the target as features')
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+
+    # handle class imbalance
+    smote = SMOTE(random_state=42)
+    X_train_res, y_train_res = smote.fit_resample(X_train_scaled, y_train)
+
+    # train RandomForest
+    rf = RandomForestClassifier(n_estimators=200, max_depth=20, min_samples_leaf=2, random_state=42, n_jobs=-1)
+    rf.fit(X_train_res, y_train_res)
+
+    # evaluate quickly
+    y_pred = rf.predict(X_test_scaled)
+    acc = accuracy_score(y_test, y_pred)
+    print(f"Training done. Test accuracy: {acc:.4f}")
+
+    # Save artifacts - keep names existing code expects for compatibility
+    joblib.dump(rf, f"{output_prefix}.pkl")
+    joblib.dump(scaler, f"{output_prefix}_scaler.pkl")
+    model_columns = list(X.columns)
+    joblib.dump(model_columns, f"{output_prefix}_columns.pkl")
+
+    # Save a combined pipeline too (recommended for serving)
+    pipeline = Pipeline([('scaler', scaler), ('classifier', rf)])
+    joblib.dump(pipeline, f"{output_prefix}_pipeline.pkl")
+
+    print('Saved artifacts: ', [f"{output_prefix}.pkl", f"{output_prefix}_scaler.pkl", f"{output_prefix}_columns.pkl", f"{output_prefix}_pipeline.pkl"]) 
+    return True
+
+rf_model = None
+scaler = None
+model_columns = None
+pipeline = None
+
+def load_artifacts():
+    """Load model artifacts into the global names rf_model, scaler, model_columns.
+
+    When available this prefers the saved pipeline artifact for consistency.
+    """
+    global rf_model, scaler, model_columns
+
+    print("Loading model artifacts...")
+    try:
+        # Prefer to load the combined pipeline if present
+        if os.path.exists('credit_risk_model_pipeline.pkl'):
+            loaded_pipeline = joblib.load('credit_risk_model_pipeline.pkl')
+            globals()['pipeline'] = loaded_pipeline
+            rf_model = loaded_pipeline.named_steps.get('classifier')
+            scaler = loaded_pipeline.named_steps.get('scaler')
+        else:
+            rf_model = joblib.load('credit_risk_model.pkl')
+            scaler = joblib.load('credit_risk_model_scaler.pkl') if os.path.exists('credit_risk_model_scaler.pkl') else joblib.load('scaler.pkl')
+
+        model_columns = joblib.load('credit_risk_model_columns.pkl') if os.path.exists('credit_risk_model_columns.pkl') else joblib.load('model_columns.pkl')
+        print(f"✓ Model loaded successfully")
+        print(f"✓ Scaler loaded successfully")
+        print(f"✓ Model expects {len(model_columns)} features")
+    except FileNotFoundError as e:
+        print(f"ERROR: Model files not found. Please run the training script first.")
+        print(f"Missing file: {e}")
+        rf_model = None
+        scaler = None
+        model_columns = None
+
+def run_startup_diagnostic():
+    if rf_model is None or model_columns is None:
+        print('Skipping startup diagnostics because model is not loaded.')
+        return
     print("\n" + "="*70)
     print("TRAINING FEATURES (what the model expects):")
     print("="*70)
@@ -145,6 +262,94 @@ def predict():
         print(f"\n{'='*70}")
         print(f"NEW PREDICTION REQUEST at {datetime.now().isoformat()}")
         print(f"{'='*70}")
+
+        # If we have a combined pipeline and the model's expected columns look
+        # numeric (bankloans schema), try to map & predict using the pipeline
+        if globals().get('pipeline', None) is not None and model_columns is not None:
+            expected_cols = list(model_columns)
+
+            # quick check for numeric-schema signature
+            numeric_signature = set(['age', 'income', 'employ', 'ed', 'address', 'debtinc', 'creddebt', 'othdebt'])
+            if numeric_signature.intersection(set(expected_cols)):
+                # mapping helper (same as brick used later)
+                def build_features_for_pipeline(req_json, expected_cols):
+                    mapping = {
+                        'age': ['age', 'person_age'],
+                        'ed': ['ed'],
+                        'employ': ['employ', 'person_emp_length', 'employmentYears'],
+                        'address': ['address'],
+                        'income': ['income', 'person_income', 'annualIncome'],
+                        'debtinc': ['debtinc', 'loan_percent_income', 'loanPercentIncome'],
+                        'creddebt': ['creddebt', 'credit_debt', 'creditScore', 'cb_person_cred_hist_length'],
+                        'othdebt': ['othdebt', 'loan_amnt', 'loanAmount']
+                    }
+
+                    out = {}
+                    for col in expected_cols:
+                        val = None
+                        if col in req_json and req_json.get(col) is not None:
+                            val = req_json.get(col)
+                        else:
+                            for alt in mapping.get(col, []):
+                                if alt in req_json and req_json.get(alt) is not None:
+                                    val = req_json.get(alt)
+                                    break
+
+                        if val is None:
+                            if col == 'debtinc':
+                                loan = req_json.get('loan_amnt') or req_json.get('loanAmount')
+                                inc = req_json.get('person_income') or req_json.get('income') or req_json.get('annualIncome')
+                                if loan and inc:
+                                    try:
+                                        val = (float(loan) / float(inc)) * 100
+                                    except Exception:
+                                        val = 0.0
+                                else:
+                                    val = 0.0
+                            elif col == 'creddebt':
+                                cs = req_json.get('creditScore')
+                                if cs is not None:
+                                    try:
+                                        val = float(cs) / 10.0
+                                    except Exception:
+                                        val = 0.0
+                                else:
+                                    val = 0.0
+                            else:
+                                val = 0.0
+
+                        try:
+                            val = float(val)
+                        except Exception:
+                            pass
+
+                        out[col] = val
+
+                    return pd.DataFrame([out], columns=expected_cols)
+
+                feature_df = build_features_for_pipeline(data, expected_cols)
+                print('Built pipeline input:', feature_df.iloc[0].to_dict())
+
+                pipe = globals().get('pipeline')
+                try:
+                    if hasattr(pipe, 'predict_proba'):
+                        proba = pipe.predict_proba(feature_df)[0]
+                        pred_num = pipe.predict(feature_df)[0]
+                    else:
+                        scaled = scaler.transform(feature_df)
+                        proba = rf_model.predict_proba(scaled)[0]
+                        pred_num = rf_model.predict(scaled)[0]
+                except Exception as e:
+                    print('Pipeline prediction failed:', e)
+                else:
+                    prediction = 'rejected' if int(pred_num) == 1 else 'approved'
+                    confidence = float(max(proba))
+                    risk_factors = []
+                    if feature_df['age'].iloc[0] < 25:
+                        risk_factors.append({'factor': 'age', 'impact': 'negative', 'description': f"Young age ({feature_df['age'].iloc[0]})"})
+                    if feature_df['income'].iloc[0] > 100000:
+                        risk_factors.append({'factor': 'income', 'impact': 'positive', 'description': f"High income (${feature_df['income'].iloc[0]:,.0f})"})
+                    return jsonify({'prediction': prediction, 'confidence': round(confidence,4), 'risk_factors': risk_factors})
         
         # ============================================
         # STEP 1: Extract and validate input data
@@ -196,6 +401,103 @@ def predict():
         }
         
         df_input = pd.DataFrame([input_data])
+
+        # If we loaded a combined pipeline (preprocessor + model), prefer using it.
+        # The pipeline we trained on bankloans.csv expects numeric features like
+        # ['age','ed','employ','address','income','debtinc','creddebt','othdebt'].
+        if globals().get('pipeline', None) is not None and model_columns is not None:
+            expected_cols = list(model_columns)
+
+            # helper that maps request JSON to expected numeric columns
+            def build_features_for_pipeline(req_json, expected_cols):
+                mapping = {
+                    'age': ['age', 'person_age'],
+                    'ed': ['ed'],
+                    'employ': ['employ', 'person_emp_length', 'employmentYears'],
+                    'address': ['address'],
+                    'income': ['income', 'person_income', 'annualIncome'],
+                    'debtinc': ['debtinc', 'loan_percent_income', 'loanPercentIncome'],
+                    'creddebt': ['creddebt', 'credit_debt', 'creditScore', 'cb_person_cred_hist_length'],
+                    'othdebt': ['othdebt', 'loan_amnt', 'loanAmount']
+                }
+
+                out = {}
+                for col in expected_cols:
+                    val = None
+                    # Check direct key match first
+                    if col in req_json and req_json.get(col) is not None:
+                        val = req_json.get(col)
+                    else:
+                        for alt in mapping.get(col, []):
+                            if alt in req_json and req_json.get(alt) is not None:
+                                val = req_json.get(alt)
+                                break
+
+                    # Derived calculations
+                    if val is None:
+                        if col == 'debtinc':
+                            loan = req_json.get('loan_amnt') or req_json.get('loanAmount')
+                            inc = req_json.get('person_income') or req_json.get('income') or req_json.get('annualIncome')
+                            if loan and inc:
+                                try:
+                                    val = (float(loan) / float(inc)) * 100
+                                except Exception:
+                                    val = 0.0
+                            else:
+                                val = 0.0
+                        elif col == 'creddebt':
+                            cs = req_json.get('creditScore')
+                            if cs is not None:
+                                try:
+                                    val = float(cs) / 10.0
+                                except Exception:
+                                    val = 0.0
+                            else:
+                                val = 0.0
+                        else:
+                            val = 0.0
+
+                    # convert to float if possible
+                    try:
+                        val = float(val)
+                    except Exception:
+                        pass
+
+                    out[col] = val
+
+                return pd.DataFrame([out], columns=expected_cols)
+
+            # build feature row and run through pipeline
+            feature_df = build_features_for_pipeline(data, expected_cols)
+            print(f"Built pipeline input: {feature_df.iloc[0].to_dict()}")
+
+            # run through pipeline
+            pipe = globals().get('pipeline')
+            X_pred = pipe.transform(feature_df) if hasattr(pipe, 'transform') and not hasattr(pipe, 'named_steps') else feature_df.values
+            try:
+                # If pipeline has predict or predict_proba methods, use them directly
+                if hasattr(pipe, 'predict_proba'):
+                    proba = pipe.predict_proba(feature_df)[0]
+                    pred_num = pipe.predict(feature_df)[0]
+                else:
+                    # fallback: use rf_model + scaler
+                    scaled = scaler.transform(feature_df)
+                    proba = rf_model.predict_proba(scaled)[0]
+                    pred_num = rf_model.predict(scaled)[0]
+            except Exception as e:
+                # as a safe fallback, continue with existing code path
+                print('Pipeline prediction failed:', e)
+            else:
+                prediction = 'rejected' if int(pred_num) == 1 else 'approved'
+                confidence = float(max(proba))
+                risk_factors = []
+                # minimal risk factors using numeric schema
+                if feature_df['age'].iloc[0] < 25:
+                    risk_factors.append({'factor': 'age', 'impact': 'negative', 'description': f"Young age ({feature_df['age'].iloc[0]})"})
+                if feature_df['income'].iloc[0] > 100000:
+                    risk_factors.append({'factor': 'income', 'impact': 'positive', 'description': f"High income (${feature_df['income'].iloc[0]:,.0f})"})
+                # return early with pipeline result
+                return jsonify({'prediction': prediction, 'confidence': round(confidence,4), 'risk_factors': risk_factors})
         
         print(f"DataFrame created with shape: {df_input.shape}")
         
@@ -449,15 +751,37 @@ def home():
     })
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Run API server or retrain model')
+    parser.add_argument('--train', action='store_true', help='Train model from CSV and save artifacts')
+    parser.add_argument('--data', default='bankloans.csv', help='Path to training CSV file (used with --train)')
+    parser.add_argument('--out', default='credit_risk_model', help='Output prefix for saved artifacts')
+    parser.add_argument('--host', default='0.0.0.0')
+    parser.add_argument('--port', default=5000, type=int)
+    args = parser.parse_args()
+
+    if args.train:
+        print(f"Training requested. Using data: {args.data}")
+        ok = train_model(args.data, args.out)
+        if ok:
+            print("Training finished successfully. Artifacts saved.")
+        else:
+            print("Training failed. See errors above.")
+        # when training from CLI we exit after training
+        exit(0 if ok else 1)
+
+    # Not training -> start server (load artifacts first)
+    load_artifacts()
+    # run startup checks and diagnostic tests
+    run_startup_diagnostic()
+
     print("\n" + "="*70)
     print("Credit Risk Prediction API with Random Forest")
     print("="*70)
     if rf_model is not None:
         print("✓ Model ready for predictions")
-        print("✓ Check the diagnostic output above to verify model behavior")
     else:
-        print("✗ Model NOT loaded - please run training script first")
+        print("✗ Model NOT loaded - please run training script first (python app.py --train --data path/to/file.csv)")
     print("="*70)
-    print("Starting server on http://0.0.0.0:5000")
+    print(f"Starting server on http://{args.host}:{args.port}")
     print("="*70 + "\n")
-    app.run(debug=True, port=5000, host='0.0.0.0')
+    app.run(debug=True, port=args.port, host=args.host)
