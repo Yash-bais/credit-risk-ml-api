@@ -28,47 +28,37 @@ except FileNotFoundError as e:
 
 if rf_model is not None:
     print("\n" + "="*60)
-    print("TESTING MODEL WITH BAD APPLICATION")
+    print("TESTING MODEL")
     print("="*60)
     
-    # Test with obviously bad application
+    # Test 1: Obviously BAD application (should be REJECTED)
     test_bad = {
-        'person_age': 25,
-        'person_income': 5000,
-        'person_emp_length': 1,
-        'loan_amnt': 150000,
-        'loan_int_rate': 20.0,
-        'loan_percent_income': 30.0,
-        'cb_person_cred_hist_length': 1,
-        'person_home_ownership': 'RENT',
-        'loan_intent': 'PERSONAL',
-        'loan_grade': 'G',
-        'cb_person_default_on_file': 'Y'
+        'person_age': 25, 'person_income': 5000, 'person_emp_length': 1,
+        'loan_amnt': 150000, 'loan_int_rate': 20.0, 'loan_percent_income': 30.0,
+        'cb_person_cred_hist_length': 1, 'person_home_ownership': 'RENT',
+        'loan_intent': 'PERSONAL', 'loan_grade': 'G', 'cb_person_default_on_file': 'Y'
     }
     
-    # Encode it the same way
-    df_test = pd.DataFrame([test_bad])
-    df_test_encoded = pd.get_dummies(
-        df_test, 
-        columns=['person_home_ownership', 'loan_intent', 'loan_grade', 'cb_person_default_on_file'],
-        drop_first=True
-    )
+    # Test 2: Obviously GOOD application (should be APPROVED)
+    test_good = {
+        'person_age': 35, 'person_income': 100000, 'person_emp_length': 10,
+        'loan_amnt': 10000, 'loan_int_rate': 5.0, 'loan_percent_income': 0.1,
+        'cb_person_cred_hist_length': 15, 'person_home_ownership': 'OWN',
+        'loan_intent': 'PERSONAL', 'loan_grade': 'A', 'cb_person_default_on_file': 'N'
+    }
     
-    # Add missing columns
-    for col in model_columns:
-        if col not in df_test_encoded.columns:
-            df_test_encoded[col] = 0
-    df_test_aligned = df_test_encoded[model_columns]
+    for label, test_data in [("BAD", test_bad), ("GOOD", test_good)]:
+        df_test = pd.DataFrame([test_data])
+        df_test_encoded = pd.get_dummies(df_test, columns=['person_home_ownership', 'loan_intent', 'loan_grade', 'cb_person_default_on_file'], drop_first=True)
+        for col in model_columns:
+            if col not in df_test_encoded.columns:
+                df_test_encoded[col] = 0
+        df_test_aligned = df_test_encoded[model_columns]
+        X_test_scaled = scaler.transform(df_test_aligned)
+        pred = rf_model.predict(X_test_scaled)[0]
+        proba = rf_model.predict_proba(X_test_scaled)[0]
+        print(f"{label} application -> raw prediction: {pred}, probabilities: {proba}")
     
-    # Scale and predict
-    X_test_scaled = scaler.transform(df_test_aligned)
-    prediction_result = rf_model.predict(X_test_scaled)[0]
-    prediction_proba = rf_model.predict_proba(X_test_scaled)[0]
-    
-    print(f"Bad application raw prediction: {prediction_result}")
-    print(f"Prediction probabilities: {prediction_proba}")
-    print(f"Expected: 1 (means default/reject)")
-    print(f"If you got 0, your labels are FLIPPED!")
     print("="*60 + "\n")
 
 @app.route('/predict', methods=['POST'])
